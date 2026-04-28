@@ -1,0 +1,52 @@
+const MermaidChart = ({ chartCode }) => {
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    mermaid.initialize({
+      startOnLoad: false, 
+      theme: 'base',
+      themeVariables: { 
+        primaryColor: '#e0f2fe', 
+        primaryTextColor: '#00205B', 
+        primaryBorderColor: '#00205B', 
+        lineColor: '#64748b', 
+        secondaryColor: '#fff7ed', 
+        tertiaryColor: '#fff' 
+      },
+      flowchart: { curve: 'basis' } 
+    });
+  }, []);
+
+  useEffect(() => {
+    if (chartCode && chartCode !== "N/A" && containerRef.current) {
+      let safeCode = chartCode.replace(/→/g, '-->').replace(/(?<!-)>(?!-)/g, '-->');
+      if (!safeCode.includes('graph ') && !safeCode.includes('flowchart ')) safeCode = "graph TD\n" + safeCode;
+
+      const id = `mermaid-svg-${Math.random().toString(36).substr(2, 9)}`;
+
+      try {
+        mermaid.render(id, safeCode).then((result) => { 
+          if (containerRef.current) containerRef.current.innerHTML = result.svg; 
+        }).catch(err => { 
+          if (containerRef.current) containerRef.current.innerHTML = `<div class="text-red-500 text-xs font-mono p-4">Mermaid Error: ${err.message}</div>`; 
+        });
+      } catch (err) {}
+    }
+  }, [chartCode]);
+
+  if (!chartCode || chartCode === "N/A") return null;
+
+  return (
+    <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-100 mb-10 fade-in">
+      <div className="flex justify-between items-center mb-6">
+          <h3 className="text-sm font-black text-[#00205B] uppercase tracking-widest flex items-center gap-2"><Layers size={18} /> Visual Process Synthesis</h3>
+          <span className="text-[10px] font-bold text-slate-400 border px-2 py-1 rounded bg-slate-50">SCROLL TO NAVIGATE ↓</span>
+      </div>
+      <div className="bg-slate-50 rounded-xl border border-slate-200/50 shadow-inner overflow-hidden">
+        <div className="mermaid-wrapper">
+          <div ref={containerRef} className="mermaid transition-all duration-500 w-full flex justify-center"></div>
+        </div>
+      </div>
+    </div>
+  );
+};

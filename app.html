@@ -1,0 +1,587 @@
+const App = () => {
+  const [view, setView] = useState('PROMPT_LINKS');
+  const [references, setReferences] = useState([]);
+  const [linksMap, setLinksMap] = useState({});
+  const [rawData, setRawData] = useState(null);
+  const [parseError, setParseError] = useState(null);
+  const [expandedPhases, setExpandedPhases] = useState([]);
+  const [selectedRole, setSelectedRole] = useState('ALL');
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    try {
+      let jsonText = document.getElementById('json-data').textContent;
+      const firstBrace = jsonText.indexOf('{');
+      const lastBrace = jsonText.lastIndexOf('}');
+      
+      if (firstBrace !== -1 && lastBrace !== -1) {
+        const data = JSON.parse(jsonText.substring(firstBrace, lastBrace + 1));
+        setRawData(data);
+        
+        if (data.phases && data.phases.length > 0) {
+          setExpandedPhases([data.phases[0].id]);
+        }
+        
+        const savedLinks = data.links || {};
+
+        const refs = new Set();
+        const regex = /(\b[A-Z]\d+(?:\.\d+)?|\bFM\d+|\bPSD|\bUG\d+|\bWD\d+)/g;
+        
+        if (data.metadata?.globalRules) data.metadata.globalRules.forEach(r => refs.add(r));
+        if (data.subProcesses) data.subProcesses.forEach(sp => { if (sp.reference && sp.reference !== "N/A") refs.add(sp.reference); });
+        if (data.phases) {
+          data.phases.forEach(p => {
+            if (p.tasks) p.tasks.forEach(t => {
+              if (t.how && t.how !== "N/A") {
+                const matches = t.how.match(regex);
+                if (matches) matches.forEach(m => refs.add(m));
+              }
+            });
+          });
+        }
+        
+        const extractedRefs = Array.from(refs).sort();
+        setReferences(extractedRefs);
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const forceEditLinks = urlParams.get('edit_links') === 'true';
+        
+        if (extractedRefs.length === 0) {
+            setView('CANVAS');
+        } else if (data.links && !forceEditLinks) {
+            setLinksMap(savedLinks);
+            setView('CANVAS');
+        } else {
+            const initMap = { ...savedLinks };
+            extractedRefs.forEach(r => {
+                if (initMap[r] === undefined) initMap[r] = '';
+            });
+            setLinksMap(initMap);
+            setView(forceEditLinks ? 'MAP_LINKS' : 'PROMPT_LINKS');
+        }
+      } else {
+        throw new Error("Invalid JSON structure detected.");
+      }
+    } catch (e) {
+      setParseError(e.message);
+    }
+  }, []);
+
+  const handleSaveToLibrary = async () => {
+      setIsSaving(true);
+      const payload = { ...rawData, links: linksMap };
+      try {
+          const res = await fetch('/save', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+          });
+          if (res.ok) alert("Document successfully saved to Library!");
+          else alert("Failed to save document.");
+      } catch (e) { alert("Server error during save."); }
+      setIsSaving(false);
+  };
+
+  const handleDownloadJson = () => {
+      const payload = { ...rawData, links: linksMap };
+      const blob = new Blob([JSON.stringify(payload, null, 4)], {type: 'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${rawData.metadata.procedureId || 'airbus_procedure'}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadHtml = async () => {
+      try {
+          const response = await fetch(window.location.href);
+          let htmlContent = await response.text();
+          
+          const payload = { ...rawData, links: linksMap };
+          const newDataString = JSON.stringify(payload, null, 4);
+          
+          const regex = /(<script type="application\/json" id="json-data">)[\s\S]*?(<\/script>)/i;
+          htmlContent = htmlContent.replace(regex, `$1\n${newDataString}\n$2`);
+          
+          const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${rawData.metadata.procedureId || 'Airbus_Document'}_Interactive.html`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+      } catch (error) {
+          alert("Error generating standalone HTML file.");
+          console.error(error);
+      }
+  };
+
+  const extractRoles = (roleString) => {
+      if (!roleString || roleString === "N/A") return [];
+      return roleString.split(/,| and /).map(r => r.trim()).filter(r => r.length > 0);
+  };
+
+  const rolesList = useMemo(() => {
+      if (!rawData?.phases) return [];
+      const rSet = new Set();
+      rawData.phases.forEach(p => {
+          extractRoles(p.accountable).forEach(r => rSet.add(r));
+          extractRoles(p.responsible).forEach(r => rSet.add(r));
+          extractRoles(p.consulted).forEach(r => rSet.add(r));
+          extractRoles(p.informed).forEach(r => rSet.add(r));
+      });
+      return Array.from(rSet).sort();
+  }, [rawData]);
+
+  const filteredPhases = useMemo(() => {
+      if (!rawData?.phases) return [];
+      if (selectedRole === 'ALL') return rawData.phases;
+      return rawData.phases.filter(p => {
+          const roles = [
+              ...extractRoles(p.accountable),
+              ...extractRoles(p.responsible),
+              ...extractRoles(p.consulted),
+              ...extractRoles(p.informed)
+          ];
+          return roles.includes(selectedRole);
+      });
+  }, [rawData, selectedRole]);
+
+  const isRoleSelected = (roleString) => {
+      if (selectedRole === 'ALL') return false;
+      return extractRoles(roleString).includes(selectedRole);
+  };
+
+  if (parseError) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+        <div className="bg-white p-10 rounded-2xl shadow-xl border-t-8 border-red-500 max-w-lg">
+          <h2 className="text-xl font-black text-red-600 mb-2 uppercase tracking-tight">JSON Parsing Error</h2>
+          <p className="text-slate-500 text-sm font-mono bg-red-50 p-4 rounded-lg border border-red-100">{parseError}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!rawData) return null;
+
+  if (view === 'PROMPT_LINKS') {
+      return (
+          <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6 fade-in">
+              <div className="bg-white p-10 rounded-2xl shadow-xl max-w-lg w-full text-center border-t-[10px] border-[#00205B]">
+                  <div className="bg-blue-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6 text-[#00205B]">
+                      <LinkIcon size={40} />
+                  </div>
+                  <h2 className="text-2xl font-black text-[#00205B] mb-3 tracking-tight">Smart Links Detection</h2>
+                  <p className="text-slate-600 mb-8 leading-relaxed">We automatically detected <strong className="text-[#00205B] text-lg bg-blue-50 px-2 rounded">{references.length}</strong> unique references in your JSON. Map them to clickable URLs?</p>
+                  <div className="flex flex-col gap-3">
+                      <button onClick={() => setView('MAP_LINKS')} className="w-full bg-[#00205B] hover:bg-blue-900 text-white font-black py-4 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2 uppercase tracking-widest text-sm"><LinkIcon size={18}/> Yes, Map URLS</button>
+                      <button onClick={() => setView('CANVAS')} className="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-3 rounded-xl transition-all text-sm uppercase">Skip to Canvas</button>
+                  </div>
+              </div>
+          </div>
+      );
+  }
+
+  if (view === 'MAP_LINKS') {
+      return (
+          <div className="min-h-screen bg-slate-50 p-6 md:p-10 fade-in">
+              <div className="max-w-4xl mx-auto bg-white rounded-2xl shadow-xl overflow-hidden border-t-[10px] border-[#00205B]">
+                  <div className="bg-slate-50 p-8 border-b border-slate-200 flex flex-col md:flex-row justify-between items-center gap-4">
+                      <div>
+                          <h2 className="text-2xl font-black text-[#00205B] flex items-center gap-2 tracking-tight"><LinkIcon size={24}/> Reference URL Mapping</h2>
+                          <p className="text-slate-500 text-sm mt-1 font-medium">Paste intranet links for each code. Leave empty if unknown.</p>
+                      </div>
+                      <button onClick={async () => {
+                          const updatedData = {...rawData, links: linksMap};
+                          setRawData(updatedData);
+                          setView('CANVAS');
+                          try {
+                              await fetch('/save', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify(updatedData)
+                              });
+                          } catch (e) { console.error("Auto-save failed", e); }
+                      }} className="bg-emerald-500 hover:bg-emerald-400 text-white px-8 py-3 rounded-xl font-black shadow-lg shadow-emerald-500/30 transition-all flex items-center gap-2 uppercase tracking-widest text-sm">
+                          Finish & Save <ArrowRightCircle size={18}/>
+                      </button>
+                  </div>
+                  <div className="p-8 grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[60vh] overflow-y-auto bg-white">
+                      {references.map(ref => (
+                          <div key={ref} className="bg-slate-50 p-4 rounded-xl border border-slate-200 flex flex-col gap-2 hover:border-[#00205B] transition-colors group">
+                              <label className="font-bold text-[#00205B] flex items-center gap-2">
+                                  <span className="bg-white text-[#00205B] px-3 py-1 rounded-lg border border-slate-200 font-black text-[10px] shadow-sm uppercase">{ref}</span>
+                              </label>
+                              <input 
+                                  type="url" 
+                                  placeholder="https://hub.airbus.com/..." 
+                                  value={linksMap[ref]}
+                                  onChange={(e) => setLinksMap({...linksMap, [ref]: e.target.value})}
+                                  className="w-full p-2.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-[#00205B] outline-none text-xs transition-all"
+                              />
+                          </div>
+                      ))}
+                  </div>
+              </div>
+          </div>
+      );
+  }
+
+  const metadata = rawData.metadata || {};
+  const visuals = rawData.visuals || {};
+  const isFramework = metadata.type === 'framework';
+  const subProcesses = rawData.subProcesses || [];
+  const useCases = rawData.useCases || [];
+  const keyDeliverables = rawData.keyDeliverables || [];
+  const checklists = rawData.checklists || [];
+
+  const togglePhase = (id) => {
+    setExpandedPhases(prev => prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]);
+  };
+
+  const renderHow = (text) => {
+    if (!text || text === "N/A") return <span className="text-slate-300 italic font-normal">-</span>;
+    const parts = text.split(/(\b[A-Z]\d+(?:\.\d+)?|\bFM\d+|\bPSD|\bUG\d+|\bWD\d+)/);
+    return parts.map((part, i) => {
+      if (part.match(/^[A-Z]\d+|FM\d+|PSD|UG\d+|WD\d+/)) {
+        if (linksMap[part]) {
+            return <a key={i} href={linksMap[part]} target="_blank" className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono border bg-blue-50 text-blue-700 border-blue-200 hover:bg-[#00205B] hover:text-white transition-all mx-0.5 shadow-sm"><LinkIcon size={10}/>{part}</a>;
+        }
+        return <span key={i} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono border bg-slate-50 text-slate-700 border-slate-200 mx-0.5 shadow-sm">{part}</span>;
+      }
+      return part;
+    });
+  };
+
+  // Logique pour le bloc d'informations contextuelles (Synthesis / Purpose / Applicability)
+  const summaryBlocks = [
+      { key: 'purpose', value: metadata.purpose, title: 'Purpose & Scope', icon: <Layers size={20} />, colorClass: 'sky' },
+      { key: 'synthesis', value: metadata.synthesis, title: 'Executive Synthesis', icon: <Info size={20} />, colorClass: 'blue' },
+      { key: 'applicability', value: metadata.applicability, title: 'Applicability & Context', icon: <Network size={20} />, colorClass: 'amber' }
+  ].filter(block => block.value && block.value !== "N/A");
+
+  const gridColsClass = summaryBlocks.length === 3 ? "md:grid-cols-3" : summaryBlocks.length === 2 ? "md:grid-cols-2" : "md:grid-cols-1";
+
+  return (
+    <div className="min-h-screen p-4 md:p-10 fade-in">
+      {/* --- TOP ACTIONS BAR --- */}
+      <div className="max-w-6xl mx-auto flex justify-between items-center mb-6">
+          <a href="/" className="text-slate-400 hover:text-[#00205B] font-bold text-sm flex items-center gap-2 transition-colors">
+              ← Back to Library
+          </a>
+          <div className="flex gap-3">
+              <button onClick={handleDownloadJson} className="flex items-center gap-2 bg-white text-slate-600 border border-slate-200 hover:bg-slate-50 px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest shadow-sm transition-all" title="Download Raw Data">
+                  <Download size={14}/> JSON
+              </button>
+              
+              <button onClick={handleDownloadHtml} className="flex items-center gap-2 bg-sky-50 text-sky-700 border border-sky-200 hover:bg-sky-100 hover:border-sky-300 px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest shadow-sm transition-all" title="Download Offline Interactive App">
+                  <Download size={14}/> Standalone HTML
+              </button>
+
+              <button onClick={handleSaveToLibrary} disabled={isSaving} className={`flex items-center gap-2 text-white px-5 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest shadow-md transition-all ${isSaving ? 'bg-slate-400' : 'bg-[#00205B] hover:bg-blue-900'}`}>
+                  <Save size={14}/> {isSaving ? 'Saving...' : 'Save to Library'}
+              </button>
+          </div>
+      </div>
+
+      {/* --- HEADER --- */}
+      <header className="max-w-6xl mx-auto bg-white rounded-2xl shadow-xl border-t-[10px] border-[#00205B] p-6 md:p-8 mb-10">
+        <div className="flex flex-col md:flex-row justify-between items-start gap-6">
+          <div className="flex-1">
+            <div className="flex items-center gap-2 text-[#00205B] font-black text-[10px] uppercase tracking-[0.25em] mb-2">
+              <Shield size={16} /> Airbus Amber | {metadata.procedureId || "REF"}
+            </div>
+            <h1 className="text-3xl md:text-5xl font-black text-[#00205B] leading-none mb-6 tracking-tighter">{metadata.title || "Document Title"}</h1>
+            <div className="flex flex-wrap gap-2 mb-2">
+              {metadata.globalRules?.map((rule, i) => (
+                linksMap[rule] ? (
+                    <a key={i} href={linksMap[rule]} target="_blank" className="bg-blue-50 hover:bg-[#00205B] text-blue-700 hover:text-white px-2 py-1 rounded text-[10px] font-bold border border-blue-200 shadow-sm flex items-center gap-1 cursor-pointer transition-colors"><LinkIcon size={10}/>{rule}</a>
+                ) : (
+                    <span key={i} className="bg-slate-100 text-slate-600 px-2 py-1 rounded text-[10px] font-bold border border-slate-200 shadow-sm">{rule}</span>
+                )
+              ))}
+              {isFramework && <span className="bg-purple-100 text-purple-700 px-2 py-1 rounded text-[10px] font-black border border-purple-200 shadow-sm uppercase tracking-wider">FRAMEWORK</span>}
+              {metadata.type === "method" && <span className="bg-sky-100 text-sky-700 px-2 py-1 rounded text-[10px] font-black border border-sky-200 shadow-sm uppercase tracking-wider">METHOD</span>}
+            </div>
+          </div>
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-5 w-full md:w-[280px] grid grid-cols-2 gap-y-3 text-xs shadow-inner">
+            <span className="text-slate-400 font-bold uppercase tracking-tighter">Issue</span>
+            <span className="font-black text-[#00205B] text-right">{metadata.issue || "N/A"}</span>
+            <span className="text-slate-400 font-bold uppercase tracking-tighter">Owner</span>
+            <span className="font-semibold text-right leading-tight">{metadata.owner || "N/A"}</span>
+            <span className="text-slate-400 font-bold uppercase tracking-tighter border-t border-slate-100 pt-2">Authorizer</span>
+            <span className="font-semibold text-right leading-tight border-t border-slate-100 pt-2">{metadata.authorizer || "N/A"}</span>
+          </div>
+        </div>
+        
+        {!isFramework && metadata.triggers && metadata.triggers.length > 0 && metadata.triggers[0] !== "N/A" && (
+          <div className="mt-6 pt-6 border-t border-slate-100">
+            <h3 className="text-orange-600 font-black text-[10px] uppercase tracking-widest mb-3 flex items-center gap-2"><Zap size={14} /> Triggers</h3>
+            <div className="flex flex-wrap gap-2">{metadata.triggers.map((t, idx) => <span key={idx} className="bg-orange-50 text-orange-700 px-3 py-1.5 rounded-lg text-xs font-semibold border border-orange-200 shadow-sm">{t}</span>)}</div>
+          </div>
+        )}
+      </header>
+
+      {/* --- DYNAMIC SUMMARY BLOCKS (Purpose, Synthesis, Applicability) --- */}
+      {summaryBlocks.length > 0 && (
+        <div className={`max-w-6xl mx-auto mb-10 grid grid-cols-1 ${gridColsClass} gap-6 fade-in`}>
+            {summaryBlocks.map((block, idx) => {
+                const isBlue = block.colorClass === 'blue';
+                const isSky = block.colorClass === 'sky';
+                const isAmber = block.colorClass === 'amber';
+                
+                return (
+                    <div key={idx} className="relative h-full transition-transform hover:-translate-y-1 duration-300">
+                        <div className={`absolute -left-2 top-0 bottom-0 w-1 rounded-full ${isBlue ? 'bg-[#00205B]' : isSky ? 'bg-sky-500' : 'bg-amber-500'}`}></div>
+                        <div className={`p-6 rounded-r-2xl border flex flex-col gap-3 h-full shadow-sm ${isBlue ? 'bg-blue-50/40 border-blue-100' : isSky ? 'bg-sky-50/40 border-sky-100' : 'bg-amber-50/40 border-amber-100'}`}>
+                            <div className="flex items-center gap-3">
+                                <div className={`p-2 rounded-lg text-white shadow-md shrink-0 ${isBlue ? 'bg-[#00205B]' : isSky ? 'bg-sky-500' : 'bg-amber-500'}`}>
+                                    {block.icon}
+                                </div>
+                                <h3 className={`font-black text-[10px] uppercase tracking-widest ${isBlue ? 'text-[#00205B]' : isSky ? 'text-sky-800' : 'text-amber-700'}`}>
+                                    {block.title}
+                                </h3>
+                            </div>
+                            <p className={`text-[12px] leading-relaxed flex-1 ${isBlue ? 'text-slate-700 italic font-medium' : 'text-slate-600'}`}>
+                                {block.value}
+                            </p>
+                        </div>
+                    </div>
+                );
+            })}
+        </div>
+      )}
+
+      {/* --- METHOD ROLES --- */}
+      {metadata.type === "method" && rawData.roles && rawData.roles.length > 0 && (
+        <div className="max-w-6xl mx-auto mb-10 fade-in">
+           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {rawData.roles.map((role, idx) => (
+                 <div key={idx} className="bg-white p-5 rounded-2xl border border-slate-200 flex flex-col shadow-sm">
+                    <span className="text-[#00205B] font-black text-sm mb-2">{role.name}</span>
+                    <span className="text-slate-500 text-xs leading-relaxed">{role.description}</span>
+                 </div>
+              ))}
+           </div>
+        </div>
+      )}
+
+      {/* --- SCHEMA MERMAID --- */}
+      <div className="max-w-6xl mx-auto">
+        <MermaidChart chartCode={visuals.mermaidChart} />
+      </div>
+
+      {/* --- FILTRE DE ROLES DYNAMIQUE --- */}
+      {!isFramework && rolesList.length > 0 && (
+          <div className="max-w-6xl mx-auto mb-8 bg-white p-4 rounded-2xl shadow-sm border border-slate-200 flex flex-col md:flex-row items-center gap-4">
+              <div className="flex items-center gap-2 text-[#00205B] font-black text-[11px] uppercase tracking-widest min-w-fit px-2">
+                  <FilterIcon size={16}/> Filter by Role:
+              </div>
+              <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1 w-full border-l pl-4 border-slate-100">
+                  <button 
+                      onClick={() => setSelectedRole('ALL')} 
+                      className={`px-4 py-2 rounded-full text-[10px] font-black transition-all whitespace-nowrap uppercase tracking-wider ${selectedRole === 'ALL' ? 'bg-[#00205B] text-white shadow-lg' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}
+                  >
+                      All Roles
+                  </button>
+                  {rolesList.map(role => (
+                      <button 
+                          key={role} 
+                          onClick={() => setSelectedRole(role)} 
+                          className={`px-4 py-2 rounded-full text-[10px] font-black transition-all whitespace-nowrap uppercase tracking-wider ${selectedRole === role ? 'bg-blue-600 text-white shadow-lg' : 'bg-white border text-slate-500 hover:border-blue-400 hover:text-blue-600'}`}
+                      >
+                          {role}
+                      </button>
+                  ))}
+              </div>
+          </div>
+      )}
+
+      {/* --- CONTENU --- */}
+      {isFramework ? (
+        <main className="max-w-6xl mx-auto space-y-12">
+          {useCases.length > 0 && useCases[0] !== "N/A" && (
+            <section className="fade-in">
+              <h3 className="text-sm font-black text-[#00205B] uppercase tracking-widest mb-6 flex items-center gap-2"><Activity size={18} /> Business Use Cases</h3>
+              <div className="flex flex-wrap gap-3">{useCases.map((uc, i) => <div key={i} className="bg-white border-2 border-slate-100 text-slate-700 px-6 py-4 rounded-2xl font-bold text-sm shadow-sm hover:border-[#00205B] transition-all cursor-default">{uc}</div>)}</div>
+            </section>
+          )}
+          
+          {subProcesses.length > 0 && subProcesses[0].code !== "N/A" && (
+            <section className="fade-in">
+              <h3 className="text-sm font-black text-[#00205B] uppercase tracking-widest mb-6 flex items-center gap-2"><Network size={18} /> Architectural Process Map</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {subProcesses.map((sp, i) => (
+                  <div key={i} className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden group">
+                    <div className="absolute top-0 right-0 w-24 h-24 bg-blue-50/50 rounded-bl-full -mr-12 -mt-12 transition-transform group-hover:scale-110"></div>
+                    <div className="relative z-10">
+                      <div className="text-[10px] font-black text-blue-500 mb-2 uppercase tracking-widest">{sp.code}</div>
+                      <h4 className="text-xl font-bold text-[#00205B] leading-tight mb-6 pr-4">{sp.title}</h4>
+                      <div className="inline-flex items-center gap-2 bg-slate-50 text-slate-500 px-3 py-1.5 rounded-lg font-mono text-[10px] font-bold border border-slate-200">
+                        Ref: {linksMap[sp.reference] ? <a href={linksMap[sp.reference]} target="_blank" className="text-blue-600 hover:underline flex items-center gap-1">{sp.reference}<LinkIcon size={10}/></a> : sp.reference}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+          
+          {keyDeliverables.length > 0 && keyDeliverables[0] !== "N/A" && (
+            <section className="p-10 bg-emerald-50 rounded-[2.5rem] border-2 border-emerald-100/50 shadow-sm relative overflow-hidden fade-in">
+              <div className="absolute top-0 right-0 p-8 opacity-10 text-emerald-900 rotate-12"><Layers size={120} /></div>
+              <h3 className="text-sm font-black text-emerald-800 uppercase tracking-widest mb-8 flex items-center gap-2 relative z-10"><Layers size={20} /> Key Governance Deliverables</h3>
+              <ul className="grid grid-cols-1 md:grid-cols-2 gap-4 relative z-10">
+                  {keyDeliverables.map((d, i) => (
+                      <li key={i} className="flex items-center gap-4 bg-white/80 backdrop-blur shadow-sm p-4 rounded-2xl border border-emerald-200/40 group hover:bg-white transition-all">
+                          <div className="w-8 h-8 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center shrink-0 font-black text-xs group-hover:bg-emerald-500 group-hover:text-white transition-colors">{i+1}</div>
+                          <span className="text-sm font-bold text-emerald-950 leading-tight">{d}</span>
+                      </li>
+                  ))}
+              </ul>
+            </section>
+          )}
+        </main>
+      ) : (
+        <main className="max-w-6xl mx-auto flex flex-col md:flex-row gap-12">
+          {/* Colonne latérale de navigation */}
+          <div className="hidden lg:flex flex-col items-center w-16 sticky top-10 h-fit">
+            {filteredPhases.map((p, idx) => (
+              <React.Fragment key={p.id}>
+                <div onClick={() => togglePhase(p.id)} className={`w-12 h-12 rounded-full flex items-center justify-center font-black text-[12px] transition-all cursor-pointer z-10 shadow-sm ${expandedPhases.includes(p.id) ? 'bg-[#00205B] text-white scale-110 shadow-xl shadow-blue-900/30' : 'bg-white text-slate-300 border-2 border-slate-200 hover:border-[#00205B] hover:text-[#00205B]'}`}>{idx + 1}</div>
+                {idx < filteredPhases.length - 1 && <div className="w-0.5 h-16 bg-slate-200 -my-1"></div>}
+              </React.Fragment>
+            ))}
+          </div>
+
+          {/* Liste des phases filtrées */}
+          <div className="flex-1 space-y-8">
+            {filteredPhases.length === 0 ? (
+                <div className="bg-white p-20 rounded-[2rem] border-2 border-dashed border-slate-200 text-center">
+                    <FilterIcon className="mx-auto text-slate-200 mb-4" size={48} />
+                    <p className="text-slate-400 font-bold uppercase tracking-widest">No phases found for this specific role</p>
+                </div>
+            ) : (
+              filteredPhases.map((phase) => (
+                  <div key={phase.id} className={`group bg-white rounded-[2rem] transition-all duration-300 border-2 ${expandedPhases.includes(phase.id) ? 'border-[#00205B] shadow-2xl translate-y-[-2px]' : 'border-white shadow-md hover:border-slate-200'}`}>
+                  
+                  <button onClick={() => togglePhase(phase.id)} className="w-full text-left p-6 md:p-8 flex justify-between items-center">
+                      <div className="pr-6">
+                      <div className="flex flex-wrap items-center gap-4 mb-3">
+                          <h2 className={`text-2xl font-black transition-colors tracking-tight ${expandedPhases.includes(phase.id) ? 'text-[#00205B]' : 'text-slate-700'}`}>{phase.title}</h2>
+                          {phase.milestone && phase.milestone !== "N/A" && <span className="bg-orange-500 text-white text-[10px] px-3 py-1 rounded-full font-black uppercase shadow-sm whitespace-nowrap">{phase.milestone}</span>}
+                          {phase.leadTime && phase.leadTime !== "N/A" && <span className="flex items-center gap-1 bg-rose-50 text-rose-700 border border-rose-100 text-[10px] px-3 py-1 rounded-full font-black uppercase whitespace-nowrap"><Clock size={12} /> {phase.leadTime}</span>}
+                      </div>
+                      
+                      <div className="flex flex-wrap gap-4 text-[10px] font-black uppercase tracking-wider mt-2">
+                          {phase.accountable && phase.accountable !== "N/A" && (
+                              <span className={`flex gap-1.5 items-center px-2 py-1 rounded border ${isRoleSelected(phase.accountable) ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-400 border-slate-100'}`}>
+                                  <Shield size={10}/> Accountable: <span className={isRoleSelected(phase.accountable) ? 'text-white' : 'text-slate-600'}>{phase.accountable}</span>
+                              </span>
+                          )}
+                          {phase.responsible && phase.responsible !== "N/A" && (
+                              <span className={`flex gap-1.5 items-center px-2 py-1 rounded border ${isRoleSelected(phase.responsible) ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-400 border-slate-100'}`}>
+                                  <Activity size={10}/> Responsible: <span className={isRoleSelected(phase.responsible) ? 'text-white' : 'text-slate-600'}>{phase.responsible}</span>
+                              </span>
+                          )}
+                          {phase.consulted && phase.consulted !== "N/A" && (
+                              <span className={`flex gap-1.5 items-center px-2 py-1 rounded border ${isRoleSelected(phase.consulted) ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-400 border-slate-100'}`}>
+                                  <MessageCircle size={10}/> Consulted: <span className={isRoleSelected(phase.consulted) ? 'text-white' : 'text-slate-600'}>{phase.consulted}</span>
+                              </span>
+                          )}
+                          {phase.informed && phase.informed !== "N/A" && (
+                              <span className={`flex gap-1.5 items-center px-2 py-1 rounded border ${isRoleSelected(phase.informed) ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-400 border-slate-100'}`}>
+                                  <Eye size={10}/> Informed: <span className={isRoleSelected(phase.informed) ? 'text-white' : 'text-slate-600'}>{phase.informed}</span>
+                              </span>
+                          )}
+                      </div>
+                      </div>
+                      <div className={`p-3 rounded-full transition-all shrink-0 ${expandedPhases.includes(phase.id) ? 'bg-blue-50 text-[#00205B] rotate-180' : 'bg-slate-50 text-slate-300 group-hover:text-slate-500'}`}><ChevronDown /></div>
+                  </button>
+
+                  {expandedPhases.includes(phase.id) && (
+                      <div className="px-8 pb-10 fade-in">
+                      <div className="h-px bg-slate-100 mb-8"></div>
+                      
+                      {/* Inputs de phase */}
+                      {phase.inputs && phase.inputs.length > 0 && phase.inputs[0] !== "N/A" && (
+                          <div className="mb-8 p-6 bg-purple-50/50 rounded-2xl border border-purple-100 flex items-start gap-4">
+                          <div className="text-purple-600 mt-1"><ArrowRightCircle size={18} /></div>
+                          <div>
+                              <h4 className="text-[10px] font-black text-purple-800 uppercase tracking-[0.2em] mb-3">Required Inputs</h4>
+                              <ul className="flex flex-wrap gap-2 text-[11px] text-purple-900 font-bold">
+                              {phase.inputs.map((inp, i) => <li key={i} className="bg-white px-3 py-1.5 rounded-lg border border-purple-200/50 shadow-sm">{inp}</li>)}
+                              </ul>
+                          </div>
+                          </div>
+                      )}
+
+                      {/* Tableau des tâches */}
+                      {phase.tasks && phase.tasks.length > 0 && phase.tasks[0].rule !== "N/A" && (
+                          <div className="overflow-hidden border border-slate-100 rounded-2xl">
+                              <table className="w-full text-left border-collapse">
+                              <thead>
+                                  <tr className="text-[10px] font-black text-slate-400 uppercase tracking-widest bg-slate-50/50 border-b border-slate-100">
+                                  <th className="p-4 w-3/4">Tasks & Execution Logic</th>
+                                  <th className="p-4">How / Methodology</th>
+                                  </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-50">
+                                  {phase.tasks.map((task, idx) => (
+                                  <tr key={idx} className="group/row hover:bg-slate-50/30 transition-colors">
+                                      <td className="p-4 text-[13px] leading-relaxed text-slate-700 font-medium group-hover/row:text-[#00205B]">{task.rule}</td>
+                                      <td className="p-4">{renderHow(task.how)}</td>
+                                  </tr>
+                                  ))}
+                              </tbody>
+                              </table>
+                          </div>
+                      )}
+
+                      {/* Deliverables de phase */}
+                      {phase.deliverables && phase.deliverables.length > 0 && phase.deliverables[0] !== "N/A" && (
+                          <div className="mt-8 p-6 bg-emerald-50/50 rounded-2xl border border-emerald-100 flex items-start gap-4">
+                          <div className="text-emerald-600 mt-1"><Layers size={18} /></div>
+                          <div>
+                              <h4 className="text-[10px] font-black text-emerald-800 uppercase tracking-[0.2em] mb-3">Key Output Deliverables</h4>
+                              <ul className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-2 text-[11px] text-emerald-900 font-bold">
+                              {phase.deliverables.map((d, i) => <li key={i} className="flex items-start gap-2 bg-white/60 p-2 rounded-lg border border-emerald-200/30 shadow-sm"><div className="w-1.5 h-1.5 bg-emerald-400 rounded-full mt-1.5 shrink-0"></div><span>{d}</span></li>)}
+                              </ul>
+                          </div>
+                          </div>
+                      )}
+                      </div>
+                  )}
+                  </div>
+              ))
+            )}
+          </div>
+        </main>
+      )}
+
+      {/* --- CHECKLISTS DE VALIDATION --- */}
+      {checklists && checklists.length > 0 && checklists[0].criterion !== "N/A" && (
+        <section className="max-w-6xl mx-auto mt-12 fade-in">
+           <div className="bg-white p-8 rounded-[2rem] shadow-xl border-t-[10px] border-blue-500">
+              <h3 className="text-xl font-black text-[#00205B] uppercase tracking-widest mb-6 flex items-center gap-3">
+                 <CheckSquare size={24} className="text-blue-500"/> Quality & Validation Checklists
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                 {checklists.map((check, idx) => (
+                    <div key={idx} className="bg-slate-50 p-5 rounded-2xl border border-slate-200">
+                       <h4 className="font-black text-[#00205B] mb-2">{check.criterion}</h4>
+                       <p className="text-sm text-slate-600 leading-relaxed italic">{check.checkLogic}</p>
+                    </div>
+                 ))}
+              </div>
+           </div>
+        </section>
+      )}
+
+    </div>
+  );
+};
